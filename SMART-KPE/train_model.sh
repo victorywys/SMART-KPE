@@ -1,13 +1,3 @@
-#!/bin/sh
-#SBATCH -N 1 # tasks requested
-#SBATCH -n 6 # tasks requested
-#SBATCH --gres=gpu:1 #GPU
-#SBATCH -e ./tmp/err_doc-title_novis_4 # send stderr to errfile 
-#SBATCH -o ./tmp/out_doc-title_novis_4 # send stdout to outfile 
-#SBATCH --mem=48000 # memory in Mb
-#SBATCH -t 1-00:00 # time:q
-#SBATCH -p gpu
-
 export TRAIN_DATA_DIR=../../data_title/
 export CACHE_DATA_DIR=../../data_title/title_snap/
 export OUTPUT_DIR=../output_new/title_snap_4/
