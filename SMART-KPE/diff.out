@@ -1,0 +1,57 @@
+1,5c1,9
+< export TRAIN_DATA_DIR=../data/openkp/
+< export CACHE_DATA_DIR=../data/openkp/meta_snap
+< export OUTPUT_DIR=../output/meta_snap/
+< export PRINT_DIR=../output/meta_snap/
+< export META_DIR=../data/openkp_meta/
+---
+> #!/bin/sh
+> #SBATCH -N 1 # tasks requested
+> #SBATCH -n 6 # tasks requested
+> #SBATCH --gres=gpu:1 #GPU
+> #SBATCH -e ./tmp/err_openkp5e-5 # send stderr to errfile 
+> #SBATCH -o ./tmp/out_openkp5e-5 # send stdout to outfile 
+> #SBATCH --mem=48000 # memory in Mb
+> #SBATCH -t 1-00:00 # time:q
+> #SBATCH -p gpu
+7c11,16
+< python -u run_model.py \
+---
+> export TRAIN_DATA_DIR=/bos/tmp6/zhenfan/homework/KPE_11747/data/openkp/
+> export CACHE_DATA_DIR=/bos/tmp6/zhenfan/homework/KPE_11747/data/openkp/ 
+> export OUTPUT_DIR=/bos/tmp6/zhenfan/homework/KPE_11747/output/berttag_5e-5/ 
+> export PRINT_DIR=/bos/tmp6/zhenfan/homework/KPE_11747/output/berttag_5e-5/
+> 
+> python3 -u run_model.py \
+11,14d19
+<     --print_dir $PRINT_DIR/ \
+<     --meta_dir $META_DIR/ \
+<     --elmo_option_file $ELMO_DIR/options.json \
+<     --elmo_weight_file $ELMO_DIR/weights.hdf5 \
+17,23c22,32
+<     --learning_rate 3e-5 \
+<     --num_train_epochs 5 \
+<     --batch_size 32 \
+<     --gradient_accumulation_steps 4 \
+<     --max_text_length 256 \
+<     --logging_steps 500 \
+<     --save_steps 500 \
+---
+>     --test \
+>     --learning_rate 5e-5 \
+>     --num_train_epochs 3 \
+>     --batch_size 4 \
+>     --tag_num 5 \
+>     --main_metric F@3 \
+>     --gradient_accumulation_steps 8 \
+>     --max_text_length 512 \
+>     --logging_steps 200 \
+>     --save_steps 800 \
+>     --evaluate_num 5000 \
+26,27c35,37
+< #    --read_from_cached_features \
+< #    --from_checkpoint /home/ubuntu/KPE_11747/output/span/checkpoint-best
+---
+>     --print_dir $PRINT_DIR \
+>     --read_from_cached_features \
+>  
