@@ -64,9 +64,10 @@ class KeyphraseSpanExtraction(object):
         # run !
         loss = self.network(**inputs)
 
-        if self.args.n_gpu > 1:
+        #print(loss)
+        #if self.args.n_gpu > 1:
             # mean() to average on multi-gpu parallel (not distributed) training
-            loss = loss.mean()
+        #    loss = loss.mean()
 
         if self.args.gradient_accumulation_steps > 1:
             loss = loss / self.args.gradient_accumulation_steps
@@ -200,6 +201,7 @@ class KeyphraseSpanExtraction(object):
         # self.network.zero_grad()
 
     def set_device(self):
+        logger.info("devices: self.args.device")
         self.network.to(self.args.device)
 
     def parallelize(self):
@@ -208,6 +210,7 @@ class KeyphraseSpanExtraction(object):
         """
         self.parallel = True
         self.network = torch.nn.DataParallel(self.network)
+        logger.info(self.network)
 
     def distribute(self):
         self.distributed = True

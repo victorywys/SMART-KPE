@@ -18,7 +18,7 @@ logger = logging.getLogger()
 
 
 # -------------------------------------------------------------------------------------------
-# Modified CNN 
+# Modified CNN
 # -------------------------------------------------------------------------------------------
 
 def _ntuple(n):
@@ -96,7 +96,7 @@ class _ConvNd(nn.Module):
         if not hasattr(self, 'padding_mode'):
             self.padding_mode = 'zeros'
 
-            
+
 class Conv1d(_ConvNd):
 
     def __init__(self, in_channels, out_channels, kernel_size, stride=1,
@@ -111,21 +111,21 @@ class Conv1d(_ConvNd):
             False, _single(0), groups, bias, padding_mode)
 
     def forward(self, input):
-        
+
         input = input.transpose(1, 2)
-        
+
         if self.padding_mode == 'circular':
             expanded_padding = ((self.padding[0] + 1) // 2, self.padding[0] // 2)
             return F.conv1d(F.pad(input, expanded_padding, mode='circular'),
                             self.weight, self.bias, self.stride,
                             _single(0), self.dilation, self.groups)
-        
+
         output = F.conv1d(input, self.weight, self.bias, self.stride,
                         self.padding, self.dilation, self.groups)
         output = output.transpose(1, 2)
         return output
-    
-    
+
+
 
 # -------------------------------------------------------------------------------------------
 # CnnGram Extractor
@@ -134,16 +134,16 @@ class Conv1d(_ConvNd):
 class NGramers(nn.Module):
     def __init__(self, input_size, hidden_size, max_gram, dropout_rate):
         super().__init__()
-        
-        self.cnn_list = nn.ModuleList([nn.Conv1d(in_channels=input_size, 
-                                                    out_channels=hidden_size, 
+
+        self.cnn_list = nn.ModuleList([nn.Conv1d(in_channels=input_size,
+                                                    out_channels=hidden_size,
                                                     kernel_size=n) for n in range(1, max_gram+1)])
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(dropout_rate)
 
-            
+
     def forward(self, x):
-        
+
         x = x.transpose(1, 2)
 
         cnn_outpus = []
@@ -155,82 +155,127 @@ class NGramers(nn.Module):
         outputs = torch.cat(cnn_outpus, dim=1)
         return outputs
 
-    
-    
+
+
 # -------------------------------------------------------------------------------------------
 # Inherit BertPreTrainedModel
 # -------------------------------------------------------------------------------------------
 class BertForCnnGramKernelRanking(BertPreTrainedModel):
-    
+
     def __init__(self, config):
         super(BertForCnnGramKernelRanking, self).__init__(config)
-        
+
         max_gram = 5
         cnn_output_size = 512
         cnn_dropout_rate = (config.hidden_dropout_prob / 2)
-        
+
         self.num_labels = config.num_labels
-        
+
+        # visual feature encoding:
+        visual_trans_layer = nn.TransformerEncoderLayer(d_model=18, nhead=3)
+        self.visual_trans = nn.TransformerEncoder(visual_trans_layer, num_layers=2)
+
+        # meta feature encoding:
+        self.meta_dim = 512 + 768
+        self.meta_selector = nn.Sequential(
+            nn.Linear(self.meta_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 4)
+        )
+
+        # multimodal embedding
+        embed_size = 18 + 768
+        phrase_trans_layer = nn.TransformerEncoderLayer(d_model=embed_size, nhead=6)
+        self.phrase_trans = nn.TransformerEncoder(phrase_trans_layer, num_layers=2)
+
         self.bert = BertModel(config)
-        self.cnn2gram = NGramers(input_size=config.hidden_size, 
-                                 hidden_size=cnn_output_size, 
-                                 max_gram=max_gram, 
+        self.cnn2gram = NGramers(input_size=config.hidden_size,
+                                 hidden_size=cnn_output_size,
+                                 max_gram=max_gram,
                                  dropout_rate=cnn_dropout_rate)
-        
-        self.classifier = nn.Linear(cnn_output_size, 1) # shape = (512, 1)
-        self.chunk_classifier = nn.Linear(cnn_output_size, config.num_labels)
+
+#        self.classifier = nn.Linear(cnn_output_size, 1) # shape = (512, 1)
+#        self.chunk_classifier = nn.Linear(cnn_output_size, config.num_labels)
+        self.classifier = nn.ModuleList([nn.Linear(cnn_output_size, 1) for _ in range(4)])
+        self.chunk_classifier = nn.ModuleList([nn.Linear(cnn_output_size, config.num_labels) for _ in range(4)])
+
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
         self.init_weights()
-            
-        
-        
+
+
+
 # -------------------------------------------------------------------------------------------
-# BertForChunkTFRanking 
-# ------------------------------------------------------------------------------------------- 
+# BertForChunkTFRanking
+# -------------------------------------------------------------------------------------------
 class BertForChunkTFRanking(BertForCnnGramKernelRanking):
 
-    def forward(self, input_ids, attention_mask, valid_ids, active_mask, valid_output, labels=None, chunk_labels=None, chunk_mask=None):
+    def forward(self, visual_input, meta_input, input_ids, attention_mask, valid_ids, active_mask, valid_output, labels=None, chunk_labels=None, chunk_mask=None):
         """
         active_mask : mention_mask for ngrams = torch.LongTensor([[1,2,1,3,4,5,4], [1,2,3,0,4,4,0]])
-        laebls : for ngrams labels = torch.LongTensor([[1,-1,-1,1,-1], [1,-1,-1,1,0]]) 
+        laebls : for ngrams labels = torch.LongTensor([[1,-1,-1,1,-1], [1,-1,-1,1,0]])
         """
         # --------------------------------------------------------------------------------
         # Bert Embedding Outputs
         outputs = self.bert(input_ids=input_ids,
                             attention_mask=attention_mask)
-        
+
         sequence_output = outputs[0]
-        
+
         # --------------------------------------------------------------------------------
-        # Valid Outputs : get first token vector  
-        batch_size = sequence_output.size(0)
+        # Meta-feature Predictor
+        bert_cls = sequence_output[:, 0, :].squeeze(1)  # batch * bert_size
+        meta_cat = torch.cat([bert_cls, meta_input], -1)
+        pred_mask_before_softmax = self.meta_selector(meta_cat)
+        pred_mask = F.softmax(pred_mask_before_softmax, -1).unsqueeze(-1).unsqueeze(-1)
+
+        # --------------------------------------------------------------------------------
+        # Visual Embedding Outputs
+        visual_t = visual_input.transpose(0, 1)
+        visual_embedding = self.visual_trans(visual_t,
+                                             src_key_padding_mask=(~attention_mask)).transpose(0, 1)
+
+        embedding = torch.cat([sequence_output, visual_embedding], -1).transpose(0, 1)  # len * batch * embed_size
+
+        phrase_embedding = self.phrase_trans(embedding,
+                                             src_key_padding_mask=(~attention_mask)).transpose(0, 1)
+
+        # --------------------------------------------------------------------------------
+        # Valid Outputs : get first token vector
+        batch_size = phrase_embedding.size(0)
         for i in range(batch_size):
             valid_num = sum(valid_ids[i]).item()
 
-            vectors = sequence_output[i][valid_ids[i] == 1]
+            vectors = phrase_embedding[i][valid_ids[i] == 1]
             valid_output[i, :valid_num].copy_(vectors)
-            
+
         # --------------------------------------------------------------------------------
         # Dropout
-        sequence_output = self.dropout(valid_output)
-        
+        phrase_embedding = self.dropout(valid_output)
+
         # --------------------------------------------------------------------------------
         # CNN Outputs
-        cnn_outputs = self.cnn2gram(sequence_output) # shape = (batch_size, max_gram_num, 512)
-        
+        cnn_outputs = self.cnn2gram(phrase_embedding) # shape = (batch_size, max_gram_num, 512)
+
         # --------------------------------------------------------------------------------
         # Classifier 512 to 1
-        classifier_scores = self.classifier(cnn_outputs) # shape = (batch_size, max_gram_num, 1)
+#        classifier_scores = self.classifier(cnn_outputs) # shape = (batch_size, max_gram_num, 1)
+        classifier_scores = torch.cat(
+            [self.classifier[i](cnn_outputs).unsqueeze(1)
+             for i in range(4)],
+            1
+        )  # shape = (batch_size, 4, max_gram_num, 1)
+        classifier_scores = torch.sum(classifier_scores * pred_mask, 1)  # shape = (batch_size, max_gram_num, 1)
+
         classifier_scores = classifier_scores.squeeze(-1) # shape = (batch_size, max_gram_num)
-        
+
         classifier_scores = classifier_scores.unsqueeze(1).expand(active_mask.size()) # shape = (batch_size, max_diff_ngram_num, max_gram_num)
         classifier_scores = classifier_scores.masked_fill(mask=active_mask, value=-float('inf'))
 
         # --------------------------------------------------------------------------------
         # Merge TF : # shape = (batch_size * max_diff_ngram_num * max_gram_num) to (batch_size * max_diff_ngram_num)
         total_scores, indices = torch.max(classifier_scores, dim=-1)
-        
+
         # --------------------------------------------------------------------------------
         # --------------------------------------------------------------------------------
         # Total Loss Compute
@@ -239,34 +284,34 @@ class BertForChunkTFRanking(BertForCnnGramKernelRanking):
             # *************************************************************************************
             # [1] Chunk Loss
             Chunk_Loss_Fct = CrossEntropyLoss(reduction='mean')
-            
+
             active_chunk_loss = chunk_mask.view(-1) != -1
             chunk_logits = self.chunk_classifier(cnn_outputs) # shape = (batch_size * num_gram, 2)
             active_chunk_logits = chunk_logits.view(-1, self.num_labels)[active_chunk_loss]
-            
+
             active_chunk_label_loss = chunk_labels.view(-1) != -1
             active_chunk_labels = chunk_labels.view(-1)[active_chunk_label_loss]
-            
+
             chunk_loss = Chunk_Loss_Fct(active_chunk_logits, active_chunk_labels)
-            
+
             # *************************************************************************************
             # *************************************************************************************
             # [2] Rank Loss
             Rank_Loss_Fct = MarginRankingLoss(margin=1, reduction='mean')
-            
+
             device = torch.device("cuda", total_scores.get_device())
             flag = torch.FloatTensor([1]).to(device)
-            
-            rank_losses = []            
+
+            rank_losses = []
             for i in range(batch_size):
-                
+
                 score = total_scores[i]
                 label = labels[i]
 
                 true_score = score[label == 1]
-                neg_score = score[label == -1]            
+                neg_score = score[label == -1]
                 rank_losses.append(Rank_Loss_Fct(true_score.unsqueeze(-1), neg_score.unsqueeze(0), flag))
-                
+
             rank_loss = torch.mean(torch.stack(rank_losses))
             # *************************************************************************************
             # *************************************************************************************
